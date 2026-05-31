@@ -2,3 +2,6 @@
 data/
 .venv/
 .vscode/
+wandb/
+runs/
+__pycache__/

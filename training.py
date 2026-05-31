@@ -2,7 +2,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-import mlflow
+from huggingface_hub import HfApi
 from PIL import Image
 import torch
 from torch import nn
@@ -88,11 +88,11 @@ def train_one_epoch(model, dataloader, epoch, loss_fn, optimizer, device):
         if i % LOSS_STEP == (LOSS_STEP - 1):
             last_loss = running_loss / LOSS_STEP
             print(f'Batch {i} loss = {last_loss}')
-            wandb.log({"train/batch/loss": last_loss}, step=(i + epoch * len(dataloader)))
+            wandb.log({"train/batch/loss": last_loss})
 
             running_loss = 0.
 
-    wandb.log({"train/epoch/loss": last_loss}, step=epoch)
+    wandb.log({"train/epoch/loss": last_loss})
 
     return last_loss
 
@@ -105,29 +105,32 @@ def val_one_epoch(model, dataloader, epoch, loss_fn, device):
     last_loss = 0.
     last_psnr = 0.
 
-    for i, data in tqdm(enumerate(dataloader)):
-        (noisy_image, bm3d_image) = data
-        (noisy_image, bm3d_image) = (noisy_image.to(device, non_blocking=True), bm3d_image.to(device, non_blocking=True))
+    with torch.no_grad():
+        for i, data in tqdm(enumerate(dataloader)):
+            (noisy_image, bm3d_image) = data
+            (noisy_image, bm3d_image) = (noisy_image.to(device, non_blocking=True), bm3d_image.to(device, non_blocking=True))
 
-        output_image = model(noisy_image)
-        loss = loss_fn(output_image, bm3d_image)
-        running_loss += loss.item()
+            output_image = model(noisy_image)
+            loss = loss_fn(output_image, bm3d_image)
+            running_loss += loss.item()
 
-        running_psnr += torch_psnr(output_image, bm3d_image).mean()
+            running_psnr += torch_psnr(output_image, bm3d_image).mean().item()
 
     last_loss = running_loss / len(dataloader)
     last_psnr = running_psnr / len(dataloader)
     print(f'Validation loss of epoch {epoch} = {last_loss}')
     print(f'Validation PSNR of epoch {epoch} = {last_psnr}')
 
-    wandb.log({"val/epoch/loss": last_loss}, step=epoch)
-    wandb.log({"val/epoch/psnr": last_psnr}, step=epoch)
+    wandb.log({"val/epoch/loss": last_loss})
+    wandb.log({"val/epoch/psnr": last_psnr})
 
     return last_psnr
 
 
 def train_loop(num_epochs, model, train_loader, val_loader, loss_fn, optimizer, runs_dir, device):
     best_psnr = 0
+    api = HfApi()
+    repo_id = "your-username/bm3d-denoiser"
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch} starting")
@@ -137,11 +140,21 @@ def train_loop(num_epochs, model, train_loader, val_loader, loss_fn, optimizer, 
         val_psnr = val_one_epoch(model, val_loader, epoch, loss_fn, device)
 
         if val_psnr > best_psnr:
+            best_psnr = val_psnr
+            ckpt_path = runs_dir / "best.pt"
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict()
-            }, runs_dir / "best.pt")
+            }, ckpt_path)
+
+            api.upload_file(
+                path_or_fileobj=str(ckpt_path),
+                path_in_repo="best.pt",
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=f"Epoch {epoch} — PSNR {val_psnr:.2f}"
+            )
 
 
 def main():
@@ -162,8 +175,9 @@ def main():
         T.Lambda(lambda x: x.float() / 255.0),
     ])
 
-    train_dataset = DenoiserDataset(Path("data/noisy"), Path("data/bm3d"), train_transforms)
-    val_dataset = DenoiserDataset(Path("data/noisy"), Path("data/bm3d"), val_transforms)
+    data_path = Path("/workspace/images")
+    train_dataset = DenoiserDataset(data_path / "noisy", data_path / "bm3d", train_transforms)
+    val_dataset = DenoiserDataset(data_path / "noisy", data_path / "bm3d", val_transforms)
 
     val_size = int(0.2 * len(train_dataset))
     train_size = len(train_dataset) - val_size
@@ -174,7 +188,7 @@ def main():
     val_dataset = Subset(val_dataset, indices[train_size:])
 
     train_loader = DataLoader(train_dataset, BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, BATCH_SIZE, shuffle=False)
 
     loss = nn.MSELoss()
 
