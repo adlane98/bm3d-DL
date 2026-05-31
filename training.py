@@ -16,14 +16,17 @@ import wandb
 from model import ConvDenoiser
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 16
-
+BATCH_SIZE = 64
 LOSS_STEP = 50
+
+LEARNING_RATE = 1e-4
+
+DEVICE = "cuda"
 
 wandb.init(
     project="bm3d-denoiser",
     config={
-        "learning_rate": 1e-3,
+        "learning_rate": LEARNING_RATE,
         "epochs": NUM_EPOCHS,
         "batch_size": BATCH_SIZE,
         "loss_step": LOSS_STEP
@@ -175,9 +178,9 @@ def main():
 
     loss = nn.MSELoss()
 
-    device = torch.device("mps")
+    device = torch.device(DEVICE)
     model = ConvDenoiser().to(device)
-    optimizer = AdamW(model.parameters(), lr=0.001)
+    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
 
     train_loop(NUM_EPOCHS, model, train_loader, val_loader, loss, optimizer, runs_dir, device)
 
